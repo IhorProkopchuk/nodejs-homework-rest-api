@@ -1,14 +1,15 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const gravatar = require("gravatar");
+const { nanoid } = require("nanoid");
 const path = require("path");
 const fs = require("fs/promises");
 const Jimp = require("jimp");
 
 const { User } = require("../models/user");
-const { HttpError, ctrlWrapper } = require("../helpers");
+const { HttpError, ctrlWrapper, transport } = require("../helpers");
 
-const { SECRET_KEY } = process.env;
+const { SECRET_KEY, META_LOGIN, BASE_URL } = process.env;
 
 const avatarsDir = path.join(__dirname, "../", "public", "avatars");
 const avatarSize = 250;
@@ -24,19 +25,70 @@ const register = async (req, res) => {
 
   const hashPassword = await bcrypt.hash(password, 10);
   const avatarURL = gravatar.url(email);
+  const verificationToken = nanoid();
 
-  const result = await User.create({
+  const newUser = await User.create({
     email,
     password: hashPassword,
     avatarURL,
     subscription,
+    verificationToken,
   });
+
+  const verifyEmail = {
+    to: email,
+    from: META_LOGIN,
+    subject: "Підтвердження реєстрації",
+    html: `<p>Вітаємо! Дякуємо за реєстрацію в додатку, для підтвердження реєстрації <a target="_blank" href="${BASE_URL}/api/auth/users/verify/${verificationToken}">натисніть тут</a></p>`,
+  };
+
+  await transport.sendMail(verifyEmail);
 
   res.status(201).json({
     user: {
-      email: result.email,
-      subscription: result.subscription,
+      email: newUser.email,
+      subscription: newUser.subscription,
     },
+  });
+};
+
+const verifyEmail = async (req, res) => {
+  const { verificationToken } = req.params;
+  const user = await User.findOne({ verificationToken });
+  if (!user) {
+    throw new HttpError(401, "Email not found");
+  }
+  await User.findByIdAndUpdate(user._id, {
+    verify: true,
+    verificationToken: "",
+  });
+
+  res.status(200).json({
+    message: "Email verify success",
+  });
+};
+
+const resendVerifyEmail = async (req, res) => {
+  const { email } = req.body;
+  const user = await User.findOne({ email });
+  if (!user) {
+    throw new HttpError(401, "Email not found");
+  }
+  if (user.verify) {
+    throw new HttpError(401, "Email already verify");
+  }
+
+  const verifyEmail = {
+    to: email,
+    from: META_LOGIN,
+    subject: "Повторне підтвердження реєстрації",
+    html: `<p>Вітаємо! Дякуємо за реєстрацію в додатку, для підтвердження реєстрації <a target="_blank" href="${BASE_URL}/api/auth/users/verify/${user.verificationToken}">натисніть тут</a></p>`,
+  };
+
+  await transport.sendMail(verifyEmail);
+
+  res.status(200).json({
+    message: "Verify email send success",
   });
 };
 
@@ -56,6 +108,10 @@ const login = async (req, res) => {
   const passwordCompare = await bcrypt.compare(password, user.password);
   if (!passwordCompare) {
     throw HttpError(401, "Email or password invalid");
+  }
+
+  if (!user.verify) {
+    throw new HttpError(401, "Email not verified");
   }
 
   const payload = {
@@ -125,4 +181,6 @@ module.exports = {
   getCurrent: ctrlWrapper(getCurrent),
   logout: ctrlWrapper(logout),
   updateAvatar: ctrlWrapper(updateAvatar),
+  verifyEmail: ctrlWrapper(verifyEmail),
+  resendVerifyEmail: ctrlWrapper(resendVerifyEmail),
 };
